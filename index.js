@@ -49,7 +49,6 @@ async function updateRoles(guild) {
 
             if (count >= 150) {
                 await member.roles.add(roleContribId);
-                await member.roles.remove(roleKhayId);
             } else if (count >= 100) {
                 await member.roles.add(roleKhayId);
                 await member.roles.remove(roleContribId);
