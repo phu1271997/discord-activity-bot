@@ -229,18 +229,36 @@ client.on('interactionCreate', async interaction => {
         );
     }
 
-    if (interaction.commandName === 'leaderboard') {
-        const sorted = Object.entries(db.users)
-            .map(([userId, data]) => {
-                ensureUserData(userId);
-                return [userId, db.users[userId].weeklyCount || 0];
-            })
-            .sort(([, a], [, b]) => b - a)
-            .slice(0, 10);
+   if (interaction.commandName === 'leaderboard') {
+    const sorted = Object.entries(db.users)
+        .sort(([, a], [, b]) => b - a)
+        .slice(0, 10);
 
-        if (sorted.length === 0) {
-            return interaction.reply('Chưa có dữ liệu.');
-        }
+    if (!sorted.length) {
+        return interaction.reply("Chưa có dữ liệu.");
+    }
+
+    const members = await interaction.guild.members.fetch();
+
+    let board = "🏆 **Bảng xếp hạng tuần này:**\n";
+    for (let i = 0; i < sorted.length; i++) {
+        const [userId, count] = sorted[i];
+        const member = members.get(userId);
+
+        const displayName =
+            member?.displayName ||
+            member?.user?.globalName ||
+            member?.user?.username ||
+            `User ${userId}`;
+
+        board += `${i + 1}. ${displayName}: ${count} tin\n`;
+    }
+
+    await interaction.reply({
+        content: board,
+        allowedMentions: { parse: [] }
+    });
+}
 
         let board = '🏆 **Bảng xếp hạng tuần này:**\n';
         for (let i = 0; i < sorted.length; i++) {
