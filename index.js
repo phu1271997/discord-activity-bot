@@ -1,3 +1,4 @@
+console.log("VERSION: leaderboard-no-mention-v1");
 require('dotenv').config();
 const { Client, GatewayIntentBits, REST, Routes, PermissionsBitField } = require('discord.js');
 const fs = require('fs');
@@ -245,13 +246,13 @@ client.on('interactionCreate', async interaction => {
         const [userId, count] = sorted[i];
         const member = members.get(userId);
 
-        const displayName =
+        const name =
             member?.displayName ||
             member?.user?.globalName ||
             member?.user?.username ||
             `User ${userId}`;
 
-        board += `${i + 1}. ${displayName}: ${count} tin\n`;
+        board += `${i + 1}. ${name}: ${count} tin\n`;
     }
 
     await interaction.reply({
@@ -259,7 +260,6 @@ client.on('interactionCreate', async interaction => {
         allowedMentions: { parse: [] }
     });
 }
-
         let board = '🏆 **Bảng xếp hạng tuần này:**\n';
         for (let i = 0; i < sorted.length; i++) {
             board += `${i + 1}. <@${sorted[i][0]}>: ${sorted[i][1]} tin\n`;
