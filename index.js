@@ -1,4 +1,3 @@
-console.log("VERSION: leaderboard-no-mention-v1");
 require('dotenv').config();
 const { Client, GatewayIntentBits, REST, Routes, PermissionsBitField } = require('discord.js');
 const fs = require('fs');
@@ -17,30 +16,51 @@ const client = new Client({
 const DATA_FILE = './messageCount.json';
 const TZ = 'Asia/Ho_Chi_Minh';
 
+const WEEKLY_CONTRIBUTOR_THRESHOLD = 50;
+const TOTAL_KHAY_THRESHOLD = 100;
+
 // =========================
 // Load / Save DB
 // =========================
 let db = {
-  users: {},
-  meta: {
-    skipWeeklyResetOnce: false
-  }
+    users: {},
+    meta: {
+        skipWeeklyResetOnce: false
+    }
 };
-if (!db.meta || typeof db.meta !== 'object') {
-  db.meta = { skipWeeklyResetOnce: false };
-}
 
 if (fs.existsSync(DATA_FILE)) {
     try {
-        db = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+        const raw = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+        db = {
+            users: raw.users && typeof raw.users === 'object' ? raw.users : {},
+            meta: raw.meta && typeof raw.meta === 'object'
+                ? raw.meta
+                : { skipWeeklyResetOnce: false }
+        };
     } catch (error) {
         console.error('Không đọc được file dữ liệu, tạo DB mới.', error.message);
-        db = { users: {} };
+        db = {
+            users: {},
+            meta: {
+                skipWeeklyResetOnce: false
+            }
+        };
     }
 }
 
 if (!db.users || typeof db.users !== 'object') {
     db.users = {};
+}
+
+if (!db.meta || typeof db.meta !== 'object') {
+    db.meta = {
+        skipWeeklyResetOnce: false
+    };
+}
+
+if (typeof db.meta.skipWeeklyResetOnce !== 'boolean') {
+    db.meta.skipWeeklyResetOnce = false;
 }
 
 function saveDB() {
@@ -64,7 +84,7 @@ function ensureUserData(userId) {
         return;
     }
 
-    // Hỗ trợ migrate từ dữ liệu cũ: db.users[userId] = number
+    // Migrate từ dữ liệu cũ: db.users[userId] = number
     if (typeof db.users[userId] === 'number') {
         db.users[userId] = {
             weeklyCount: db.users[userId],
@@ -79,21 +99,11 @@ function ensureUserData(userId) {
     db.users[userId].lastMessageAt = db.users[userId].lastMessageAt || null;
 }
 
-function getDaysInactive(lastMessageAt) {
-    if (!lastMessageAt) return 9999;
-
-    const last = new Date(lastMessageAt);
-    if (Number.isNaN(last.getTime())) return 9999;
-
-    const now = new Date();
-    return Math.floor((now - last) / (1000 * 60 * 60 * 24));
-}
-
 // =========================
 // Role Logic
 // =========================
 async function updateRoles(guild) {
-    console.log(`[${moment().tz(TZ).format()}] Bắt đầu quét và cập nhật role...`);
+    console.log(`[${moment().tz(TZ).format('YYYY-MM-DD HH:mm:ss')}] Bắt đầu quét và cập nhật role...`);
 
     const roleKhayId = process.env.ROLE_KHAY;
     const roleContribId = process.env.ROLE_CONTRIBUTOR;
@@ -107,7 +117,7 @@ async function updateRoles(guild) {
 
     const members = await guild.members.fetch();
 
-    for (const [userId, rawUserData] of Object.entries(db.users)) {
+    for (const [userId] of Object.entries(db.users)) {
         try {
             ensureUserData(userId);
             const userData = db.users[userId];
@@ -123,10 +133,9 @@ async function updateRoles(guild) {
 
             const weeklyCount = userData.weeklyCount || 0;
             const totalCount = userData.totalCount || 0;
-            const daysInactive = getDaysInactive(userData.lastMessageAt);
 
-            // Contributor: > 200 tin / tuần
-            if (weeklyCount > 200) {
+            // Contributor: đủ 50 tin / tuần thì cấp, không đủ thì gỡ
+            if (weeklyCount >= WEEKLY_CONTRIBUTOR_THRESHOLD) {
                 if (!member.roles.cache.has(roleContribId)) {
                     await member.roles.add(roleContribId);
                     console.log(`Đã cấp Contributor cho ${member.user.tag} (${weeklyCount} tin/tuần).`);
@@ -138,19 +147,11 @@ async function updateRoles(guild) {
                 }
             }
 
-            // Khầy: đủ 150 tin tổng thì cấp
-            if (totalCount >= 150) {
+            // Khầy: đủ 100 tin tổng thì cấp, không tự gỡ vì inactive
+            if (totalCount >= TOTAL_KHAY_THRESHOLD) {
                 if (!member.roles.cache.has(roleKhayId)) {
                     await member.roles.add(roleKhayId);
                     console.log(`Đã cấp Khầy cho ${member.user.tag} (${totalCount} tin tổng).`);
-                }
-            }
-
-            // Khầy: 30 ngày không hoạt động thì gỡ
-            if (daysInactive >= 30) {
-                if (member.roles.cache.has(roleKhayId)) {
-                    await member.roles.remove(roleKhayId);
-                    console.log(`Đã gỡ Khầy của ${member.user.tag} vì ${daysInactive} ngày không hoạt động.`);
                 }
             }
         } catch (err) {
@@ -165,27 +166,24 @@ async function updateRoles(guild) {
 // Cron Jobs
 // =========================
 
-// Mỗi ngày lúc 00:00 kiểm tra inactive để gỡ Khầy nếu cần
-cron.schedule('0 0 * * *', async () => {
-    console.log('Đang chạy kiểm tra inactive hàng ngày...');
-    const guild = client.guilds.cache.get(process.env.GUILD_ID);
-    if (guild) {
-        await updateRoles(guild);
-    } else {
-        console.error('Không tìm thấy guild để chạy cron daily.');
-    }
-}, { timezone: TZ });
-
 // Chủ nhật 23:59: xét role rồi reset weeklyCount
 cron.schedule('59 23 * * 0', async () => {
-    console.log('Đang thực hiện quét cuối tuần...');
+    console.log('Đang thực hiện cron cuối tuần...');
     const guild = client.guilds.cache.get(process.env.GUILD_ID);
 
-    if (guild) {
-        await updateRoles(guild);
-    } else {
+    if (!guild) {
         console.error('Không tìm thấy guild để chạy cron weekly.');
+        return;
     }
+
+    if (db.meta.skipWeeklyResetOnce) {
+        db.meta.skipWeeklyResetOnce = false;
+        saveDB();
+        console.log('Đã bỏ qua reset weekly cho tuần này theo lệnh admin.');
+        return;
+    }
+
+    await updateRoles(guild);
 
     for (const userId of Object.keys(db.users)) {
         ensureUserData(userId);
@@ -203,7 +201,10 @@ client.on('messageCreate', message => {
     if (message.author.bot || !message.guild) return;
 
     const allowedChannels = getAllowedChannels();
-    if (!allowedChannels.includes(message.channel.id)) return;
+
+    if (allowedChannels.length > 0 && !allowedChannels.includes(message.channel.id)) {
+        return;
+    }
 
     const userId = message.author.id;
     ensureUserData(userId);
@@ -231,49 +232,50 @@ client.on('interactionCreate', async interaction => {
             ? moment(db.users[userId].lastMessageAt).tz(TZ).format('DD/MM/YYYY HH:mm:ss')
             : 'Chưa có';
 
-        await interaction.reply(
+        return interaction.reply(
             `Tuần này bạn đã gửi **${weeklyCount}** tin nhắn.\n` +
             `Tổng cộng bạn đã gửi **${totalCount}** tin nhắn.\n` +
             `Tin nhắn gần nhất: **${lastMessageAt}**`
         );
     }
 
-   if (interaction.commandName === 'leaderboard') {
-    const sorted = Object.entries(db.users)
-        .sort(([, a], [, b]) => b - a)
-        .slice(0, 10);
+    if (interaction.commandName === 'leaderboard') {
+        const sorted = Object.entries(db.users)
+            .map(([userId, raw]) => {
+                ensureUserData(userId);
+                return [userId, db.users[userId]];
+            })
+            .sort(([, a], [, b]) => b.weeklyCount - a.weeklyCount)
+            .slice(0, 10);
 
-    if (!sorted.length) {
-        return interaction.reply("Chưa có dữ liệu.");
-    }
-
-    const members = await interaction.guild.members.fetch();
-
-    let board = "🏆 **Bảng xếp hạng tuần này:**\n";
-    for (let i = 0; i < sorted.length; i++) {
-        const [userId, count] = sorted[i];
-        const member = members.get(userId);
-
-        const name =
-            member?.displayName ||
-            member?.user?.globalName ||
-            member?.user?.username ||
-            `User ${userId}`;
-
-        board += `${i + 1}. ${name}: ${count} tin\n`;
-    }
-
-    await interaction.reply({
-        content: board,
-        allowedMentions: { parse: [] }
-    });
-}
-        let board = '🏆 **Bảng xếp hạng tuần này:**\n';
-        for (let i = 0; i < sorted.length; i++) {
-            board += `${i + 1}. <@${sorted[i][0]}>: ${sorted[i][1]} tin\n`;
+        if (!sorted.length) {
+            return interaction.reply({
+                content: 'Chưa có dữ liệu.',
+                ephemeral: true
+            });
         }
 
-        await interaction.reply(board);
+        const members = await interaction.guild.members.fetch();
+
+        let board = '🏆 **Bảng xếp hạng tuần này:**\n';
+
+        for (let i = 0; i < sorted.length; i++) {
+            const [userId, data] = sorted[i];
+            const member = members.get(userId);
+
+            const name =
+                member?.displayName ||
+                member?.user?.globalName ||
+                member?.user?.username ||
+                `User ${userId}`;
+
+            board += `${i + 1}. ${name}: ${data.weeklyCount} tin\n`;
+        }
+
+        return interaction.reply({
+            content: board,
+            allowedMentions: { parse: [] }
+        });
     }
 
     if (interaction.commandName === 'forcerun') {
@@ -284,15 +286,48 @@ client.on('interactionCreate', async interaction => {
             });
         }
 
-        await interaction.deferReply();
+        await interaction.deferReply({ ephemeral: true });
 
         try {
             await updateRoles(interaction.guild);
-            await interaction.editReply('Đã chạy quét role thành công.');
+            return interaction.editReply('Đã chạy quét role thành công.');
         } catch (error) {
             console.error(error);
-            await interaction.editReply('Có lỗi khi chạy quét role.');
+            return interaction.editReply('Có lỗi khi chạy quét role.');
         }
+    }
+
+    if (interaction.commandName === 'skipreset') {
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+            return interaction.reply({
+                content: 'Bạn không có quyền dùng lệnh này!',
+                ephemeral: true
+            });
+        }
+
+        db.meta.skipWeeklyResetOnce = true;
+        saveDB();
+
+        return interaction.reply({
+            content: 'Đã bật bỏ qua lần reset weekly kế tiếp.',
+            ephemeral: true
+        });
+    }
+
+    if (interaction.commandName === 'resetstatus') {
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+            return interaction.reply({
+                content: 'Bạn không có quyền dùng lệnh này!',
+                ephemeral: true
+            });
+        }
+
+        return interaction.reply({
+            content: db.meta.skipWeeklyResetOnce
+                ? 'Hiện đang **BẬT** bỏ qua lần reset weekly kế tiếp.'
+                : 'Hiện đang **TẮT** bỏ qua lần reset weekly kế tiếp.',
+            ephemeral: true
+        });
     }
 });
 
@@ -302,7 +337,9 @@ client.on('interactionCreate', async interaction => {
 const commands = [
     { name: 'weekstats', description: 'Xem số tin nhắn tuần này và tổng số tin nhắn của bạn' },
     { name: 'leaderboard', description: 'Xem top 10 người nhắn tin nhiều nhất trong tuần' },
-    { name: 'forcerun', description: 'Admin: Ép bot quét và cập nhật role ngay' }
+    { name: 'forcerun', description: 'Admin: Ép bot quét và cập nhật role ngay' },
+    { name: 'skipreset', description: 'Admin: Bỏ qua lần reset weekly kế tiếp' },
+    { name: 'resetstatus', description: 'Admin: Xem trạng thái bỏ qua reset weekly' }
 ];
 
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
