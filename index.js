@@ -20,7 +20,15 @@ const TZ = 'Asia/Ho_Chi_Minh';
 // =========================
 // Load / Save DB
 // =========================
-let db = { users: {} };
+let db = {
+  users: {},
+  meta: {
+    skipWeeklyResetOnce: false
+  }
+};
+if (!db.meta || typeof db.meta !== 'object') {
+  db.meta = { skipWeeklyResetOnce: false };
+}
 
 if (fs.existsSync(DATA_FILE)) {
     try {
