@@ -1,5 +1,6 @@
 console.log("VERSION: leaderboard-no-mention-v1");
 require('dotenv').config();
+require('dotenv').config();
 const { Client, GatewayIntentBits, REST, Routes, PermissionsBitField } = require('discord.js');
 const fs = require('fs');
 const cron = require('node-cron');
