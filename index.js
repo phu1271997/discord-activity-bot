@@ -19,7 +19,7 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
-const TOKEN = process.env.TOKEN;
+const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 
 // ===== ROLE IDs =====
