@@ -78,10 +78,23 @@ function saveData() {
   }
 }
 
-// ===== CLEAN OLD DATA (rolling 7 days) =====
+// ===== WEEK LOGIC: MONDAY -> SUNDAY =====
+function getStartOfWeekTimestamp() {
+  const now = new Date();
+
+  // Sunday = 0, Monday = 1, Tuesday = 2, ... Saturday = 6
+  const day = now.getDay();
+  const diffToMonday = day === 0 ? 6 : day - 1;
+
+  const monday = new Date(now);
+  monday.setDate(now.getDate() - diffToMonday);
+  monday.setHours(0, 0, 0, 0);
+
+  return monday.getTime();
+}
+
 function cleanupUserMessages(userId) {
-  const now = Date.now();
-  const weekAgo = now - 7 * 24 * 60 * 60 * 1000;
+  const startOfWeek = getStartOfWeekTimestamp();
 
   if (!messageData[userId] || !Array.isArray(messageData[userId])) {
     messageData[userId] = [];
@@ -89,7 +102,7 @@ function cleanupUserMessages(userId) {
   }
 
   messageData[userId] = messageData[userId].filter((timestamp) => {
-    return typeof timestamp === "number" && timestamp > weekAgo;
+    return typeof timestamp === "number" && timestamp >= startOfWeek;
   });
 }
 
@@ -234,10 +247,6 @@ const commands = [
   new SlashCommandBuilder()
     .setName("weeklystats")
     .setDescription("Xem bạn đã nhắn bao nhiêu tin trong tuần này"),
-
-  new SlashCommandBuilder()
-    .setName("force_scan")
-    .setDescription("Chạy quét role ngay lập tức"),
 ].map((command) => command.toJSON());
 
 const rest = new REST({ version: "10" }).setToken(TOKEN);
@@ -285,7 +294,7 @@ client.on("interactionCreate", async (interaction) => {
       const count = getWeeklyCount(user.id);
 
       await interaction.reply({
-        content: `${user.username} đã nhắn ${count} tin trong 7 ngày qua.`,
+        content: `${user.username} đã nhắn ${count} tin trong tuần này.`,
         ephemeral: true,
       });
       return;
@@ -295,7 +304,7 @@ client.on("interactionCreate", async (interaction) => {
       const count = getWeeklyCount(interaction.user.id);
 
       await interaction.reply({
-        content: `Bạn đã nhắn ${count} tin trong 7 ngày qua.`,
+        content: `Bạn đã nhắn ${count} tin trong tuần này.`,
         ephemeral: true,
       });
       return;
@@ -317,7 +326,7 @@ client.on("interactionCreate", async (interaction) => {
       const topUsers = await buildLeaderboard(guild, LEADERBOARD_LIMIT);
 
       if (!topUsers.length) {
-        await interaction.editReply("Chưa có dữ liệu tin nhắn trong 7 ngày qua.");
+        await interaction.editReply("Chưa có dữ liệu tin nhắn trong tuần này.");
         return;
       }
 
@@ -326,15 +335,6 @@ client.on("interactionCreate", async (interaction) => {
       });
 
       await interaction.editReply(`**Leaderboard tuần này**\n${lines.join("\n")}`);
-      return;
-    }
-
-    if (interaction.commandName === "force_scan") {
-      await interaction.deferReply({ ephemeral: true });
-
-      await dailyCheck();
-
-      await interaction.editReply("Đã chạy quét role ngay.");
       return;
     }
   } catch (error) {
