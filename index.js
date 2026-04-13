@@ -1,5 +1,6 @@
 require("dotenv").config();
 const fs = require("fs");
+const path = require("path");
 const {
   Client,
   GatewayIntentBits,
@@ -19,8 +20,10 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
+// ===== ENV =====
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID;
 
 // ===== ROLE IDs =====
 const ROLE_ELITE = "1410903958800830474";
@@ -31,129 +34,325 @@ const ROLE_LV15 = "1418780779646947408";
 const MIN_CONTRIBUTOR = 50;
 const MIN_ELITE = 60;
 const REQUIRE_CONTRIBUTOR = 200;
+const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const MESSAGE_FILE = path.join(__dirname, "messageCount.json");
+const LEADERBOARD_LIMIT = 10;
 
-// ===== LOAD DATA =====
+// ===== VALIDATE ENV =====
+if (!TOKEN) {
+  throw new Error("Thiếu DISCORD_TOKEN trong file .env");
+}
+
+if (!CLIENT_ID) {
+  throw new Error("Thiếu CLIENT_ID trong file .env");
+}
+
+if (!GUILD_ID) {
+  throw new Error("Thiếu GUILD_ID trong file .env");
+}
+
+// ===== LOAD / SAVE DATA =====
 let messageData = {};
-if (fs.existsSync("./messageCount.json")) {
-  messageData = JSON.parse(fs.readFileSync("./messageCount.json"));
+
+function loadData() {
+  try {
+    if (!fs.existsSync(MESSAGE_FILE)) {
+      fs.writeFileSync(MESSAGE_FILE, JSON.stringify({}, null, 2), "utf8");
+      messageData = {};
+      return;
+    }
+
+    const raw = fs.readFileSync(MESSAGE_FILE, "utf8");
+    messageData = raw ? JSON.parse(raw) : {};
+  } catch (error) {
+    console.error("Lỗi khi đọc messageCount.json:", error);
+    messageData = {};
+  }
 }
 
-// ===== SAVE DATA =====
 function saveData() {
-  fs.writeFileSync(
-    "./messageCount.json",
-    JSON.stringify(messageData, null, 2)
-  );
+  try {
+    fs.writeFileSync(MESSAGE_FILE, JSON.stringify(messageData, null, 2), "utf8");
+  } catch (error) {
+    console.error("Lỗi khi ghi messageCount.json:", error);
+  }
 }
 
-// ===== CLEAN OLD (7 days) =====
-function cleanup(userId) {
+// ===== CLEAN OLD DATA (rolling 7 days) =====
+function cleanupUserMessages(userId) {
   const now = Date.now();
   const weekAgo = now - 7 * 24 * 60 * 60 * 1000;
 
-  if (!messageData[userId]) return;
+  if (!messageData[userId] || !Array.isArray(messageData[userId])) {
+    messageData[userId] = [];
+    return;
+  }
 
-  messageData[userId] = messageData[userId].filter(
-    (t) => t > weekAgo
-  );
+  messageData[userId] = messageData[userId].filter((timestamp) => {
+    return typeof timestamp === "number" && timestamp > weekAgo;
+  });
 }
 
-// ===== COUNT =====
-function getCount(userId) {
-  cleanup(userId);
+function cleanupAllMessages() {
+  for (const userId of Object.keys(messageData)) {
+    cleanupUserMessages(userId);
+  }
+}
+
+function getWeeklyCount(userId) {
+  cleanupUserMessages(userId);
   return messageData[userId]?.length || 0;
+}
+
+function getDisplayName(member) {
+  return member.nickname || member.user.globalName || member.user.username;
+}
+
+async function buildLeaderboard(guild, limit = LEADERBOARD_LIMIT) {
+  cleanupAllMessages();
+
+  const rows = [];
+
+  for (const userId of Object.keys(messageData)) {
+    const count = getWeeklyCount(userId);
+    if (count <= 0) continue;
+
+    let member = null;
+    try {
+      member = await guild.members.fetch(userId);
+    } catch {
+      member = null;
+    }
+
+    if (!member) continue;
+    if (member.user.bot) continue;
+
+    rows.push({
+      userId,
+      name: getDisplayName(member),
+      count,
+    });
+  }
+
+  rows.sort((a, b) => b.count - a.count);
+
+  return rows.slice(0, limit);
 }
 
 // ===== TRACK MESSAGE =====
 client.on("messageCreate", (message) => {
-  if (message.author.bot) return;
+  try {
+    if (message.author.bot) return;
+    if (!message.guild) return;
 
-  const userId = message.author.id;
+    const userId = message.author.id;
 
-  if (!messageData[userId]) {
-    messageData[userId] = [];
+    if (!messageData[userId] || !Array.isArray(messageData[userId])) {
+      messageData[userId] = [];
+    }
+
+    cleanupUserMessages(userId);
+    messageData[userId].push(Date.now());
+    saveData();
+  } catch (error) {
+    console.error("Lỗi trong messageCreate:", error);
   }
-
-  messageData[userId].push(Date.now());
-  saveData();
 });
 
-// ===== DAILY CHECK =====
+// ===== ROLE SCAN =====
 async function dailyCheck() {
-  console.log("Running daily check...");
+  console.log("[dailyCheck] Bắt đầu quét role...");
 
-  client.guilds.cache.forEach(async (guild) => {
-    const members = await guild.members.fetch();
+  try {
+    const guild = await client.guilds.fetch(GUILD_ID).catch(() => null);
 
-    members.forEach(async (member) => {
-      if (member.user.bot) return;
+    if (!guild) {
+      console.error("[dailyCheck] Không tìm thấy guild.");
+      return;
+    }
 
-      const count = getCount(member.id);
+    const fullGuild = await guild.fetch();
+    const members = await fullGuild.members.fetch();
 
-      const hasElite = member.roles.cache.has(ROLE_ELITE);
-      const hasContributor = member.roles.cache.has(
-        ROLE_CONTRIBUTOR
-      );
-      const hasLv15 = member.roles.cache.has(ROLE_LV15);
+    for (const [, member] of members) {
+      try {
+        if (member.user.bot) continue;
 
-      // REMOVE ELITE
-      if (hasElite && count < MIN_ELITE) {
-        await member.roles.remove(ROLE_ELITE);
+        const count = getWeeklyCount(member.id);
+
+        const hasElite = member.roles.cache.has(ROLE_ELITE);
+        const hasContributor = member.roles.cache.has(ROLE_CONTRIBUTOR);
+        const hasLv15 = member.roles.cache.has(ROLE_LV15);
+
+        // Gỡ Elite nếu không đủ 60 tin / tuần
+        if (hasElite && count < MIN_ELITE) {
+          await member.roles.remove(ROLE_ELITE);
+          console.log(`[dailyCheck] Removed Elite from ${member.user.tag} | count=${count}`);
+        }
+
+        // Gỡ Contributor nếu không đủ 50 tin / tuần
+        if (hasContributor && count < MIN_CONTRIBUTOR) {
+          await member.roles.remove(ROLE_CONTRIBUTOR);
+          console.log(`[dailyCheck] Removed Contributor from ${member.user.tag} | count=${count}`);
+        }
+
+        // Cấp Contributor nếu có lv15 và đủ 200 tin / tuần
+        // Không auto cấp Elite
+        if (!hasContributor && hasLv15 && count >= REQUIRE_CONTRIBUTOR) {
+          await member.roles.add(ROLE_CONTRIBUTOR);
+          console.log(`[dailyCheck] Added Contributor to ${member.user.tag} | count=${count}`);
+        }
+      } catch (error) {
+        console.error(`[dailyCheck] Lỗi với member ${member.user?.tag || member.id}:`, error);
       }
+    }
 
-      // REMOVE CONTRIBUTOR
-      if (hasContributor && count < MIN_CONTRIBUTOR) {
-        await member.roles.remove(ROLE_CONTRIBUTOR);
-      }
-
-      // ADD CONTRIBUTOR
-      if (!hasContributor && hasLv15 && count >= REQUIRE_CONTRIBUTOR) {
-        await member.roles.add(ROLE_CONTRIBUTOR);
-      }
-    });
-  });
+    cleanupAllMessages();
+    saveData();
+    console.log("[dailyCheck] Quét xong.");
+  } catch (error) {
+    console.error("[dailyCheck] Lỗi tổng:", error);
+  }
 }
 
-// chạy mỗi 24h
-setInterval(dailyCheck, 24 * 60 * 60 * 1000);
-
-// ===== SLASH COMMAND =====
+// ===== SLASH COMMANDS =====
 const commands = [
   new SlashCommandBuilder()
     .setName("check_activity")
-    .setDescription("Check message count")
+    .setDescription("Kiểm tra số tin nhắn tuần này của 1 member")
     .addUserOption((option) =>
-      option.setName("user").setDescription("User").setRequired(true)
+      option
+        .setName("user")
+        .setDescription("Member cần kiểm tra")
+        .setRequired(true)
     ),
-].map((cmd) => cmd.toJSON());
+
+  new SlashCommandBuilder()
+    .setName("leaderboard")
+    .setDescription("Xem top member nhắn tin tuần này"),
+
+  new SlashCommandBuilder()
+    .setName("weeklystats")
+    .setDescription("Xem bạn đã nhắn bao nhiêu tin trong tuần này"),
+
+  new SlashCommandBuilder()
+    .setName("force_scan")
+    .setDescription("Chạy quét role ngay lập tức"),
+].map((command) => command.toJSON());
 
 const rest = new REST({ version: "10" }).setToken(TOKEN);
 
+// ===== READY =====
 client.once("ready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
+  loadData();
+  cleanupAllMessages();
+  saveData();
+
   try {
-    await rest.put(Routes.applicationCommands(CLIENT_ID), {
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
       body: commands,
     });
-    console.log("Slash command registered");
-  } catch (err) {
-    console.error(err);
+    console.log("Slash commands registered to guild.");
+  } catch (error) {
+    console.error("Lỗi đăng ký slash command:", error);
   }
+
+  await dailyCheck();
+
+  setInterval(async () => {
+    await dailyCheck();
+  }, CHECK_INTERVAL_MS);
 });
 
 // ===== HANDLE SLASH =====
 client.on("interactionCreate", async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
+  try {
+    if (!interaction.isChatInputCommand()) return;
 
-  if (interaction.commandName === "check_activity") {
-    const user = interaction.options.getUser("user");
-    const count = getCount(user.id);
+    if (interaction.commandName === "check_activity") {
+      const user = interaction.options.getUser("user");
 
-    await interaction.reply(
-      `${user.username} đã chat ${count} tin trong 7 ngày qua`
-    );
+      if (!user) {
+        await interaction.reply({
+          content: "Không tìm thấy user.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const count = getWeeklyCount(user.id);
+
+      await interaction.reply({
+        content: `${user.username} đã nhắn ${count} tin trong 7 ngày qua.`,
+        ephemeral: true,
+      });
+      return;
+    }
+
+    if (interaction.commandName === "weeklystats") {
+      const count = getWeeklyCount(interaction.user.id);
+
+      await interaction.reply({
+        content: `Bạn đã nhắn ${count} tin trong 7 ngày qua.`,
+        ephemeral: true,
+      });
+      return;
+    }
+
+    if (interaction.commandName === "leaderboard") {
+      const guild = interaction.guild;
+
+      if (!guild) {
+        await interaction.reply({
+          content: "Lệnh này chỉ dùng được trong server.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      await interaction.deferReply();
+
+      const topUsers = await buildLeaderboard(guild, LEADERBOARD_LIMIT);
+
+      if (!topUsers.length) {
+        await interaction.editReply("Chưa có dữ liệu tin nhắn trong 7 ngày qua.");
+        return;
+      }
+
+      const lines = topUsers.map((item, index) => {
+        return `${index + 1}. ${item.name} — ${item.count} tin`;
+      });
+
+      await interaction.editReply(`**Leaderboard tuần này**\n${lines.join("\n")}`);
+      return;
+    }
+
+    if (interaction.commandName === "force_scan") {
+      await interaction.deferReply({ ephemeral: true });
+
+      await dailyCheck();
+
+      await interaction.editReply("Đã chạy quét role ngay.");
+      return;
+    }
+  } catch (error) {
+    console.error("Lỗi interactionCreate:", error);
+
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp({
+        content: "Có lỗi xảy ra khi xử lý lệnh.",
+        ephemeral: true,
+      });
+    } else {
+      await interaction.reply({
+        content: "Có lỗi xảy ra khi xử lý lệnh.",
+        ephemeral: true,
+      });
+    }
   }
 });
 
+loadData();
 client.login(TOKEN);
