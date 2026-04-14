@@ -34,9 +34,9 @@ const ROLE_LV15 = "1418780779646947408";
 const MIN_CONTRIBUTOR = 50;
 const MIN_ELITE = 60;
 const REQUIRE_CONTRIBUTOR = 200;
-const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const MESSAGE_FILE = path.join(__dirname, "messageCount.json");
 const LEADERBOARD_LIMIT = 10;
+const WEEKLY_CHECK_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // 7 ngày
 
 // ===== VALIDATE ENV =====
 if (!TOKEN) {
@@ -228,6 +228,69 @@ async function dailyCheck() {
   }
 }
 
+// ===== WEEKLY SCHEDULE: SUNDAY 23:00 =====
+function getNextSunday23Delay() {
+  const now = new Date();
+  const target = new Date(now);
+
+  const currentDay = now.getDay(); // Sunday = 0
+  let daysUntilSunday = (7 - currentDay) % 7;
+
+  // Nếu hôm nay là Chủ nhật và đã qua 23:00 thì chuyển sang Chủ nhật tuần sau
+  if (
+    daysUntilSunday === 0 &&
+    (
+      now.getHours() > 23 ||
+      (now.getHours() === 23 && (
+        now.getMinutes() > 0 ||
+        now.getSeconds() > 0 ||
+        now.getMilliseconds() > 0
+      ))
+    )
+  ) {
+    daysUntilSunday = 7;
+  }
+
+  target.setDate(now.getDate() + daysUntilSunday);
+  target.setHours(23, 0, 0, 0);
+
+  return target.getTime() - now.getTime();
+}
+
+function formatDelay(ms) {
+  const totalSeconds = Math.floor(ms / 1000);
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  return `${days}d ${hours}h ${minutes}m ${seconds}s`;
+}
+
+function scheduleWeeklyCheck() {
+  const delay = getNextSunday23Delay();
+
+  console.log(`[schedule] Lần quét tiếp theo sau: ${formatDelay(delay)}`);
+
+  setTimeout(async () => {
+    try {
+      console.log("[schedule] Đến lịch quét Chủ nhật 23:00");
+      await dailyCheck();
+    } catch (error) {
+      console.error("[schedule] Lỗi khi chạy weekly check:", error);
+    }
+
+    setInterval(async () => {
+      try {
+        console.log("[schedule] Chạy quét định kỳ hằng tuần");
+        await dailyCheck();
+      } catch (error) {
+        console.error("[schedule] Lỗi khi chạy weekly check:", error);
+      }
+    }, WEEKLY_CHECK_INTERVAL_MS);
+  }, delay);
+}
+
 // ===== SLASH COMMANDS =====
 const commands = [
   new SlashCommandBuilder()
@@ -268,11 +331,7 @@ client.once("ready", async () => {
     console.error("Lỗi đăng ký slash command:", error);
   }
 
-  await dailyCheck();
-
-  setInterval(async () => {
-    await dailyCheck();
-  }, CHECK_INTERVAL_MS);
+  scheduleWeeklyCheck();
 });
 
 // ===== HANDLE SLASH =====
